@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$project_dir"
+
+fail() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ "$(git branch --show-current)" == "main" ]] ||
+  fail "releases must be created from main"
+[[ -z "$(git status --porcelain)" ]] ||
+  fail "the worktree must be clean before releasing"
+
+git fetch --quiet origin main --tags
+
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse refs/remotes/origin/main)" ]] ||
+  fail "main must be up to date with origin/main"
+
+latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ -n "$latest_tag" ]]; then
+  printf 'Latest release tag: %s\n' "$latest_tag"
+fi
+
+read -r -p 'New release tag (vX.Y.Z): ' version
+readonly version
+readonly version_pattern='^v([0-9]+)\.([0-9]+)\.([0-9]+)$'
+
+[[ "$version" =~ $version_pattern ]] ||
+  fail "release tag must use vX.Y.Z format"
+
+readonly tag="$version"
+
+if git show-ref --verify --quiet "refs/tags/$tag" ||
+  git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+  fail "tag $tag already exists"
+fi
+
+git tag -a "$tag" -m "$tag Release"
+
+if ! git push origin "refs/tags/$tag"; then
+  git tag -d "$tag" >/dev/null
+  fail "failed to push $tag"
+fi
+
+printf 'Released %s\n' "$tag"

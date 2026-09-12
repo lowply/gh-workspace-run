@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+test -z "$(gofmt -l .)"
+go test ./...
+go vet ./...
