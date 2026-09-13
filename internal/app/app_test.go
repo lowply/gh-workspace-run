@@ -16,11 +16,13 @@ func TestRunUsage(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "missing separator and command"},
-		{name: "separator without command", args: []string{"--"}},
+		{name: "missing subcommand"},
+		{name: "bare command form", args: []string{"--", "true"}},
+		{name: "run missing separator and command", args: []string{"run"}},
+		{name: "run separator without command", args: []string{"run", "--"}},
 		{name: "sync rejects positional arguments", args: []string{"sync", "extra"}},
-		{name: "invalid persistence", args: []string{"--persist", "forever", "--", "true"}},
-		{name: "non-positive persistence", args: []string{"--persist", "0s", "--", "true"}},
+		{name: "invalid persistence", args: []string{"run", "--persist", "forever", "--", "true"}},
+		{name: "non-positive persistence", args: []string{"run", "--persist", "0s", "--", "true"}},
 	}
 
 	for _, tt := range tests {
@@ -41,7 +43,7 @@ func TestRunUsage(t *testing.T) {
 }
 
 func TestParseDefaults(t *testing.T) {
-	got, err := parseArgs([]string{"--", "script/test", "test/example_test.rb"})
+	got, err := parseArgs([]string{"run", "--", "script/test", "test/example_test.rb"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +60,17 @@ func TestParseSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.syncOnly || got.remoteDir != "/workspaces/custom" || !got.verbose {
+	if !got.sync || len(got.command) != 0 || got.remoteDir != "/workspaces/custom" || !got.verbose {
+		t.Fatalf("options = %#v", got)
+	}
+}
+
+func TestParseRunWithSync(t *testing.T) {
+	got, err := parseArgs([]string{"run", "--sync", "--", "script/test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got.command, " ") != "script/test" {
 		t.Fatalf("options = %#v", got)
 	}
 }
@@ -153,13 +165,37 @@ func TestRunFlushPurgesCacheWithoutExternalTools(t *testing.T) {
 	}
 }
 
-func TestRunSyncThenExecutesCommand(t *testing.T) {
+func TestRunWithoutSyncExecutesCommandOnly(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, false)
 	var stdout, stderr bytes.Buffer
 
 	status := Run(
 		context.Background(),
-		[]string{"--", "script/test", "test/a b.rb"},
+		[]string{"run", "--", "script/test", "test/a b.rb"},
+		nil,
+		&stdout,
+		&stderr,
+	)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	if got := fixture.events(); got != "run\n" {
+		t.Fatalf("events = %q", got)
+	}
+	if strings.Contains(stdout.String(), "Syncing to ") ||
+		!strings.Contains(stdout.String(), "Running: script/test") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunWithSyncSynchronizesThenExecutesCommand(t *testing.T) {
+	fixture := installWorkflowTools(t, 0, false)
+	var stdout, stderr bytes.Buffer
+
+	status := Run(
+		context.Background(),
+		[]string{"run", "--sync", "--", "script/test", "test/a b.rb"},
 		nil,
 		&stdout,
 		&stderr,
@@ -177,7 +213,7 @@ func TestRunSyncThenExecutesCommand(t *testing.T) {
 	}
 }
 
-func TestRunSyncOnlyDoesNotExecuteUserCommand(t *testing.T) {
+func TestSyncDoesNotExecuteUserCommand(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, false)
 	var stderr bytes.Buffer
 
@@ -227,7 +263,7 @@ func TestRunDoesNotExecuteAfterRsyncFailure(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, true)
 	var stderr bytes.Buffer
 
-	status := Run(context.Background(), []string{"--", "script/test"}, nil, io.Discard, &stderr)
+	status := Run(context.Background(), []string{"run", "--sync", "--", "script/test"}, nil, io.Discard, &stderr)
 
 	if status != 1 {
 		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
@@ -241,7 +277,7 @@ func TestRunReturnsRemoteExitStatus(t *testing.T) {
 	installWorkflowTools(t, 37, false)
 	var stderr bytes.Buffer
 
-	status := Run(context.Background(), []string{"--", "script/test"}, nil, io.Discard, &stderr)
+	status := Run(context.Background(), []string{"run", "--", "script/test"}, nil, io.Discard, &stderr)
 
 	if status != 37 {
 		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
@@ -253,7 +289,7 @@ func TestRunUsesRemoteDirectoryOverride(t *testing.T) {
 
 	status := Run(
 		context.Background(),
-		[]string{"--remote-dir", "/custom/worktree", "--", "true"},
+		[]string{"run", "--remote-dir", "/custom/worktree", "--", "true"},
 		nil,
 		io.Discard,
 		io.Discard,

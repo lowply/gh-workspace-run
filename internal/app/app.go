@@ -21,10 +21,10 @@ import (
 	"github.com/lowply/gh-workspace-run/internal/syncer"
 )
 
-const usage = "usage: gh workspace-run [--remote-dir PATH] [--persist DURATION] [--verbose] -- COMMAND [ARG...]\n       gh workspace-run sync [--remote-dir PATH] [--persist DURATION] [--verbose]\n       gh workspace-run config\n       gh workspace-run flush"
+const usage = "usage: gh workspace-run sync [--remote-dir PATH] [--persist DURATION] [--verbose]\n       gh workspace-run run [--sync] [--remote-dir PATH] [--persist DURATION] [--verbose] -- COMMAND [ARG...]\n       gh workspace-run config\n       gh workspace-run flush"
 
 type options struct {
-	syncOnly   bool
+	sync       bool
 	configOnly bool
 	flushOnly  bool
 	remoteDir  string
@@ -110,13 +110,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fail(stderr, err)
 	}
 
-	_, _ = fmt.Fprintf(stdout, "Syncing to %s...\n", discovered.Codespace)
-	synchronizer := syncer.Syncer{Runner: runner, Remote: client}
-	if err := synchronizer.Run(ctx, discovered.Root, remoteDir); err != nil {
-		return fail(stderr, err)
-	}
-	if opts.syncOnly {
-		return 0
+	if opts.sync {
+		_, _ = fmt.Fprintf(stdout, "Syncing to %s...\n", discovered.Codespace)
+		synchronizer := syncer.Syncer{Runner: runner, Remote: client}
+		if err := synchronizer.Run(ctx, discovered.Root, remoteDir); err != nil {
+			return fail(stderr, err)
+		}
+		if len(opts.command) == 0 {
+			return 0
+		}
 	}
 
 	_, _ = fmt.Fprintf(stdout, "Running: %s\n", displayCommand(opts.command))
@@ -149,32 +151,44 @@ func displayCommand(command []string) string {
 
 func parseArgs(args []string) (options, error) {
 	opts := options{persist: 3 * time.Hour}
-	if len(args) > 0 && args[0] == "config" {
+	if len(args) == 0 {
+		return options{}, usageError{errors.New("command is required")}
+	}
+	if args[0] == "config" {
 		if len(args) != 1 {
 			return options{}, usageError{errors.New("config does not accept arguments")}
 		}
 		opts.configOnly = true
 		return opts, nil
 	}
-	if len(args) > 0 && args[0] == "flush" {
+	if args[0] == "flush" {
 		if len(args) != 1 {
 			return options{}, usageError{errors.New("flush does not accept arguments")}
 		}
 		opts.flushOnly = true
 		return opts, nil
 	}
-	if len(args) > 0 && args[0] == "sync" {
-		opts.syncOnly = true
-		args = args[1:]
+	run := false
+	switch args[0] {
+	case "sync":
+		opts.sync = true
+	case "run":
+		run = true
+	default:
+		return options{}, usageError{fmt.Errorf("unknown command %q", args[0])}
 	}
+	args = args[1:]
 
 	flags := flag.NewFlagSet("workspace-run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	if run {
+		flags.BoolVar(&opts.sync, "sync", false, "")
+	}
 	flags.StringVar(&opts.remoteDir, "remote-dir", "", "")
 	flags.DurationVar(&opts.persist, "persist", opts.persist, "")
 	flags.BoolVar(&opts.verbose, "verbose", false, "")
 
-	if opts.syncOnly {
+	if !run {
 		if err := flags.Parse(args); err != nil {
 			return options{}, usageError{err}
 		}

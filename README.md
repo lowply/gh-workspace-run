@@ -4,15 +4,15 @@
 repository's GitHub Codespace.
 
 ```console
-$ gh workspace-run -- script/test
-Syncing to silver-space...
+$ gh workspace-run run -- script/test
 Running: script/test
 ```
 
-Local files are authoritative. Before each command, the extension sends tracked
-files and untracked, non-ignored files to the Codespace with `rsync`, removes
-remote-only Git-visible files, and leaves remote ignored files and `.git`
-untouched.
+Run commands against the existing remote workspace, or synchronize local files
+first. When synchronizing, local files are authoritative: the extension sends
+tracked files and untracked, non-ignored files to the Codespace with `rsync`,
+removes remote-only Git-visible files, and leaves remote ignored files and
+`.git` untouched.
 
 ## Requirements
 
@@ -58,11 +58,17 @@ gh extension upgrade workspace-run
 
 ## Usage
 
+Run a command without synchronizing:
+
+```console
+gh workspace-run run -- script/test
+gh workspace-run run -- script/test test/jobs/example_test.rb
+```
+
 Synchronize, then run a command:
 
 ```console
-gh workspace-run -- script/test
-gh workspace-run -- script/test test/jobs/example_test.rb
+gh workspace-run run --sync -- script/test
 ```
 
 Synchronize without running a command:
@@ -98,6 +104,7 @@ gh workspace-run flush
 Options must appear before `--`:
 
 ```text
+--sync              Synchronize before running (run only)
 --remote-dir PATH   Override /workspaces/<repository-name>
 --persist DURATION  Override the 3h SSH connection persistence
 --verbose           Print subprocess commands and rsync statistics
@@ -106,7 +113,7 @@ Options must appear before `--`:
 Example:
 
 ```console
-gh workspace-run --remote-dir /workspaces/custom --persist 30m -- script/test
+gh workspace-run run --remote-dir /workspaces/custom --persist 30m -- script/test
 ```
 
 Set `DEBUG=1` to print each external command and its elapsed execution time:
@@ -123,10 +130,12 @@ DEBUG=1 gh workspace-run sync
    `${XDG_CONFIG_HOME:-~/.config}/gh-workspace-run/config.yml`.
 3. Generate supported OpenSSH configuration with `gh codespace ssh --config`.
 4. Configure OpenSSH connection multiplexing with `ControlPersist 3h`.
-5. Compare `git ls-files -co --exclude-standard -z` locally and remotely.
-6. Transfer the local file set with rsync.
-7. Delete remote Git-visible paths that no longer exist locally.
-8. Run the requested command from the remote workspace directory.
+5. When synchronization is requested, compare
+   `git ls-files -co --exclude-standard -z` locally and remotely, transfer the
+   local file set with rsync, and delete remote Git-visible paths that no
+   longer exist locally.
+6. When running, execute the requested command from the remote workspace
+   directory.
 
 The first invocation establishes the Codespaces SSH tunnel. Later invocations
 reuse the OpenSSH control connection for up to three hours after the last use.
