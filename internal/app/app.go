@@ -21,10 +21,20 @@ import (
 	"github.com/lowply/gh-workspace-run/internal/syncer"
 )
 
-const usage = "usage: gh workspace-run [--remote-dir PATH] [--persist DURATION] [--verbose] -- COMMAND [ARG...]\n       gh workspace-run sync [--remote-dir PATH] [--persist DURATION] [--verbose]\n       gh workspace-run config\n       gh workspace-run flush"
+const usage = `usage: gh workspace-run [--sync] [--remote-dir PATH] [--persist DURATION] [--verbose] [-- COMMAND [ARG...]]
+       gh workspace-run config
+       gh workspace-run flush
+
+options:
+  --sync              Synchronize local files before finishing or running
+  --remote-dir PATH   Override /workspaces/<repository-name>
+  --persist DURATION  Override the 3h SSH connection persistence
+  --verbose           Print subprocess commands and rsync statistics
+  -h, --help          Show help`
 
 type options struct {
-	syncOnly   bool
+	sync       bool
+	helpOnly   bool
 	configOnly bool
 	flushOnly  bool
 	remoteDir  string
@@ -48,6 +58,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n%s\n", err, usage)
 		return 2
+	}
+	if opts.helpOnly {
+		_, _ = fmt.Fprintln(stdout, usage)
+		return 0
 	}
 	if opts.configOnly {
 		path, created, err := config.Ensure()
@@ -110,13 +124,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fail(stderr, err)
 	}
 
-	_, _ = fmt.Fprintf(stdout, "Syncing to %s...\n", discovered.Codespace)
-	synchronizer := syncer.Syncer{Runner: runner, Remote: client}
-	if err := synchronizer.Run(ctx, discovered.Root, remoteDir); err != nil {
-		return fail(stderr, err)
-	}
-	if opts.syncOnly {
-		return 0
+	if opts.sync {
+		_, _ = fmt.Fprintf(stdout, "Syncing to %s...\n", discovered.Codespace)
+		synchronizer := syncer.Syncer{Runner: runner, Remote: client}
+		if err := synchronizer.Run(ctx, discovered.Root, remoteDir); err != nil {
+			return fail(stderr, err)
+		}
+		if len(opts.command) == 0 {
+			return 0
+		}
 	}
 
 	_, _ = fmt.Fprintf(stdout, "Running: %s\n", displayCommand(opts.command))
@@ -149,43 +165,31 @@ func displayCommand(command []string) string {
 
 func parseArgs(args []string) (options, error) {
 	opts := options{persist: 3 * time.Hour}
-	if len(args) > 0 && args[0] == "config" {
+	if len(args) == 0 || (len(args) == 1 && (args[0] == "--help" || args[0] == "-h")) {
+		opts.helpOnly = true
+		return opts, nil
+	}
+	if args[0] == "config" {
 		if len(args) != 1 {
-			return options{}, usageError{errors.New("config does not accept arguments")}
+			return options{}, usageError{errors.New("config does not accept arguments or options")}
 		}
 		opts.configOnly = true
 		return opts, nil
 	}
-	if len(args) > 0 && args[0] == "flush" {
+	if args[0] == "flush" {
 		if len(args) != 1 {
-			return options{}, usageError{errors.New("flush does not accept arguments")}
+			return options{}, usageError{errors.New("flush does not accept arguments or options")}
 		}
 		opts.flushOnly = true
 		return opts, nil
 	}
-	if len(args) > 0 && args[0] == "sync" {
-		opts.syncOnly = true
-		args = args[1:]
-	}
 
 	flags := flag.NewFlagSet("workspace-run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.BoolVar(&opts.sync, "sync", false, "")
 	flags.StringVar(&opts.remoteDir, "remote-dir", "", "")
 	flags.DurationVar(&opts.persist, "persist", opts.persist, "")
 	flags.BoolVar(&opts.verbose, "verbose", false, "")
-
-	if opts.syncOnly {
-		if err := flags.Parse(args); err != nil {
-			return options{}, usageError{err}
-		}
-		if opts.persist <= 0 {
-			return options{}, usageError{errors.New("--persist must be greater than zero")}
-		}
-		if flags.NArg() != 0 {
-			return options{}, usageError{errors.New("sync does not accept positional arguments")}
-		}
-		return opts, nil
-	}
 
 	separator := -1
 	for i, arg := range args {
@@ -194,21 +198,26 @@ func parseArgs(args []string) (options, error) {
 			break
 		}
 	}
-	if separator < 0 {
-		return options{}, usageError{errors.New("remote command must follow --")}
+	flagArgs := args
+	if separator >= 0 {
+		flagArgs = args[:separator]
 	}
-	if err := flags.Parse(args[:separator]); err != nil {
+	if err := flags.Parse(flagArgs); err != nil {
 		return options{}, usageError{err}
 	}
 	if opts.persist <= 0 {
 		return options{}, usageError{errors.New("--persist must be greater than zero")}
 	}
 	if flags.NArg() != 0 {
-		return options{}, usageError{fmt.Errorf("unexpected argument %q", strings.Join(flags.Args(), " "))}
+		return options{}, usageError{errors.New("remote command must follow --")}
 	}
-	opts.command = append([]string(nil), args[separator+1:]...)
-	if len(opts.command) == 0 {
-		return options{}, usageError{errors.New("remote command is required")}
+	if separator >= 0 {
+		opts.command = append([]string(nil), args[separator+1:]...)
+		if len(opts.command) == 0 {
+			return options{}, usageError{errors.New("remote command is required after --")}
+		}
+	} else if !opts.sync {
+		return options{}, usageError{errors.New("either --sync or a remote command is required")}
 	}
 	return opts, nil
 }

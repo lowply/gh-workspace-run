@@ -13,14 +13,17 @@ import (
 
 func TestRunUsage(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name    string
+		args    []string
+		wantErr string
 	}{
-		{name: "missing separator and command"},
-		{name: "separator without command", args: []string{"--"}},
-		{name: "sync rejects positional arguments", args: []string{"sync", "extra"}},
-		{name: "invalid persistence", args: []string{"--persist", "forever", "--", "true"}},
-		{name: "non-positive persistence", args: []string{"--persist", "0s", "--", "true"}},
+		{name: "flush rejects options", args: []string{"flush", "--sync"}, wantErr: "flush does not accept arguments or options"},
+		{name: "config rejects command", args: []string{"config", "--", "true"}, wantErr: "config does not accept arguments or options"},
+		{name: "options without operation", args: []string{"--verbose"}, wantErr: "either --sync or a remote command is required"},
+		{name: "separator without command", args: []string{"--sync", "--"}, wantErr: "remote command is required after --"},
+		{name: "command without separator", args: []string{"true"}, wantErr: "remote command must follow --"},
+		{name: "invalid persistence", args: []string{"--persist", "forever", "--", "true"}, wantErr: "invalid value"},
+		{name: "non-positive persistence", args: []string{"--persist", "0s", "--", "true"}, wantErr: "--persist must be greater than zero"},
 	}
 
 	for _, tt := range tests {
@@ -36,7 +39,34 @@ func TestRunUsage(t *testing.T) {
 			if !strings.Contains(stderr.String(), "gh workspace-run") {
 				t.Fatalf("stderr = %q, want renamed command", stderr.String())
 			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantErr)
+			}
 		})
+	}
+}
+
+func TestRunHelpWithoutExternalTools(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	for _, args := range [][]string{nil, {"--help"}, {"-h"}} {
+		var stdout, stderr bytes.Buffer
+
+		status := Run(context.Background(), args, nil, &stdout, &stderr)
+
+		if status != 0 {
+			t.Fatalf("args = %q, status = %d, stderr = %q", args, status, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "usage: gh workspace-run") {
+			t.Fatalf("args = %q, stdout = %q, want help", args, stdout.String())
+		}
+		for _, option := range []string{"--sync", "--remote-dir PATH", "--persist DURATION", "--verbose", "-h, --help"} {
+			if !strings.Contains(stdout.String(), option) {
+				t.Fatalf("args = %q, stdout = %q, want option %q", args, stdout.String(), option)
+			}
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("args = %q, stderr = %q, want empty", args, stderr.String())
+		}
 	}
 }
 
@@ -54,11 +84,21 @@ func TestParseDefaults(t *testing.T) {
 }
 
 func TestParseSync(t *testing.T) {
-	got, err := parseArgs([]string{"sync", "--remote-dir", "/workspaces/custom", "--verbose"})
+	got, err := parseArgs([]string{"--sync", "--remote-dir", "/workspaces/custom", "--verbose"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.syncOnly || got.remoteDir != "/workspaces/custom" || !got.verbose {
+	if !got.sync || len(got.command) != 0 || got.remoteDir != "/workspaces/custom" || !got.verbose {
+		t.Fatalf("options = %#v", got)
+	}
+}
+
+func TestParseSyncWithCommand(t *testing.T) {
+	got, err := parseArgs([]string{"--sync", "--", "script/test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.sync || strings.Join(got.command, " ") != "script/test" {
 		t.Fatalf("options = %#v", got)
 	}
 }
@@ -153,13 +193,37 @@ func TestRunFlushPurgesCacheWithoutExternalTools(t *testing.T) {
 	}
 }
 
-func TestRunSyncThenExecutesCommand(t *testing.T) {
+func TestRunWithoutSyncExecutesCommandOnly(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, false)
 	var stdout, stderr bytes.Buffer
 
 	status := Run(
 		context.Background(),
 		[]string{"--", "script/test", "test/a b.rb"},
+		nil,
+		&stdout,
+		&stderr,
+	)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	if got := fixture.events(); got != "run\n" {
+		t.Fatalf("events = %q", got)
+	}
+	if strings.Contains(stdout.String(), "Syncing to ") ||
+		!strings.Contains(stdout.String(), "Running: script/test") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunWithSyncSynchronizesThenExecutesCommand(t *testing.T) {
+	fixture := installWorkflowTools(t, 0, false)
+	var stdout, stderr bytes.Buffer
+
+	status := Run(
+		context.Background(),
+		[]string{"--sync", "--", "script/test", "test/a b.rb"},
 		nil,
 		&stdout,
 		&stderr,
@@ -177,11 +241,11 @@ func TestRunSyncThenExecutesCommand(t *testing.T) {
 	}
 }
 
-func TestRunSyncOnlyDoesNotExecuteUserCommand(t *testing.T) {
+func TestSyncDoesNotExecuteUserCommand(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, false)
 	var stderr bytes.Buffer
 
-	status := Run(context.Background(), []string{"sync"}, nil, io.Discard, &stderr)
+	status := Run(context.Background(), []string{"--sync"}, nil, io.Discard, &stderr)
 
 	if status != 0 {
 		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
@@ -196,7 +260,7 @@ func TestRunEnablesProcessTimingsWithDebugEnvironment(t *testing.T) {
 	t.Setenv("DEBUG", "1")
 	var stderr bytes.Buffer
 
-	status := Run(context.Background(), []string{"sync"}, nil, io.Discard, &stderr)
+	status := Run(context.Background(), []string{"--sync"}, nil, io.Discard, &stderr)
 
 	if status != 0 {
 		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
@@ -210,7 +274,7 @@ func TestRunEnablesProcessTimingsWithDebugEnvironment(t *testing.T) {
 func TestRunUsesConfiguredCodespaceWithoutListingCodespaces(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, false)
 
-	if status := Run(context.Background(), []string{"sync"}, nil, io.Discard, io.Discard); status != 0 {
+	if status := Run(context.Background(), []string{"--sync"}, nil, io.Discard, io.Discard); status != 0 {
 		t.Fatalf("status = %d", status)
 	}
 
@@ -227,7 +291,7 @@ func TestRunDoesNotExecuteAfterRsyncFailure(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, true)
 	var stderr bytes.Buffer
 
-	status := Run(context.Background(), []string{"--", "script/test"}, nil, io.Discard, &stderr)
+	status := Run(context.Background(), []string{"--sync", "--", "script/test"}, nil, io.Discard, &stderr)
 
 	if status != 1 {
 		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
