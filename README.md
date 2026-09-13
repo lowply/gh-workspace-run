@@ -4,7 +4,7 @@
 repository's GitHub Codespace.
 
 ```console
-$ gh workspace-run run -- script/test
+$ gh workspace-run -- script/test
 Running: script/test
 ```
 
@@ -58,32 +58,53 @@ gh extension upgrade workspace-run
 
 ## Usage
 
-Run a command without synchronizing:
+| Invocation | Behavior | Exit status |
+| --- | --- | --- |
+| `gh workspace-run` | Show help | `0` |
+| `gh workspace-run --help` | Show help | `0` |
+| `gh workspace-run -h` | Show help | `0` |
+| `gh workspace-run --sync` | Synchronize only | `0` on success |
+| `gh workspace-run -- COMMAND [ARG...]` | Run without synchronizing | Remote command status |
+| `gh workspace-run --sync -- COMMAND [ARG...]` | Synchronize, then run | Sync failure or remote command status |
+| `gh workspace-run config` | Create or report the configuration file | `0` on success |
+| `gh workspace-run flush` | Purge all cached files and sockets | `0` on success |
 
-```console
-gh workspace-run run -- script/test
-gh workspace-run run -- script/test test/jobs/example_test.rb
+Options must appear before `--`:
+
+```text
+--sync              Synchronize local files before finishing or running
+--remote-dir PATH   Override /workspaces/<repository-name>
+--persist DURATION  Override the 3h SSH connection persistence
+--verbose           Print subprocess commands and rsync statistics
+-h, --help          Show help
 ```
 
-Synchronize, then run a command:
+Examples:
 
 ```console
-gh workspace-run run --sync -- script/test
+gh workspace-run -- script/test
+gh workspace-run -- script/test test/jobs/example_test.rb
+gh workspace-run --sync -- script/test
+gh workspace-run --sync --verbose
+gh workspace-run --remote-dir /workspaces/custom --persist 30m -- script/test
 ```
 
-Synchronize without running a command:
+`config` and `flush` do not accept options or arguments. Invocations that do
+not request synchronization or provide a command are also rejected:
 
 ```console
-gh workspace-run sync
+gh workspace-run flush --sync
+gh workspace-run config -- COMMAND
+gh workspace-run --verbose
+gh workspace-run --sync --
+gh workspace-run COMMAND
 ```
 
-Create the configuration file:
+Everything after `--` belongs to the remote command, even when it resembles an
+extension option.
 
-```console
-gh workspace-run config
-```
-
-The command creates `${XDG_CONFIG_HOME:-$HOME/.config}/gh-workspace-run/config.yml`
+The `config` command creates
+`${XDG_CONFIG_HOME:-$HOME/.config}/gh-workspace-run/config.yml`
 when it does not exist and never overwrites an existing file. Edit the generated
 mapping:
 
@@ -101,25 +122,10 @@ Purge all cached SSH configuration files and control sockets:
 gh workspace-run flush
 ```
 
-Options must appear before `--`:
-
-```text
---sync              Synchronize before running (run only)
---remote-dir PATH   Override /workspaces/<repository-name>
---persist DURATION  Override the 3h SSH connection persistence
---verbose           Print subprocess commands and rsync statistics
-```
-
-Example:
-
-```console
-gh workspace-run run --remote-dir /workspaces/custom --persist 30m -- script/test
-```
-
 Set `DEBUG=1` to print each external command and its elapsed execution time:
 
 ```console
-DEBUG=1 gh workspace-run sync
+DEBUG=1 gh workspace-run --sync
 ```
 
 ## How it works
