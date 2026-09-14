@@ -67,6 +67,7 @@ gh extension upgrade workspace-run
 | `gh workspace-run -- COMMAND [ARG...]` | Run without synchronizing | Remote command status |
 | `gh workspace-run --sync -- COMMAND [ARG...]` | Synchronize, then run | Sync failure or remote command status |
 | `gh workspace-run config` | Create or report the configuration file | `0` on success |
+| `gh workspace-run agent-guide` | Print a detailed Markdown guide for agents | `0` |
 | `gh workspace-run flush` | Purge all cached files and sockets | `0` on success |
 
 Options must appear before `--`:
@@ -89,8 +90,9 @@ gh workspace-run --sync --verbose
 gh workspace-run --remote-dir /workspaces/custom --persist 30m -- script/test
 ```
 
-`config` and `flush` do not accept options or arguments. Invocations that do
-not request synchronization or provide a command are also rejected:
+`config`, `agent-guide`, and `flush` do not accept options or arguments.
+Invocations that do not request synchronization or provide a command are also
+rejected:
 
 ```console
 gh workspace-run flush --sync
@@ -115,6 +117,17 @@ repositories:
 
 Every repository must be mapped to its Codespace name. The command fails rather
 than searching for an unmapped Codespace.
+
+Print a detailed Markdown guide for coding agents:
+
+```console
+gh workspace-run agent-guide
+```
+
+The guide includes the resolved configuration path. When the current repository
+can be resolved and `gh codespace list --repo OWNER/REPOSITORY` returns exactly
+one Codespace, it also includes a copyable repository mapping. Context lookup is
+best-effort and never prevents the guide from being printed.
 
 Purge all cached SSH configuration files and control sockets:
 
