@@ -15,7 +15,7 @@ type fileConfig struct {
 const template = "repositories:\n  owner/repository: codespace-name\n"
 
 func Ensure() (string, bool, error) {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return "", false, err
 	}
@@ -53,7 +53,7 @@ func Ensure() (string, bool, error) {
 }
 
 func Codespace(repository string) (string, error) {
-	path, err := configPath()
+	path, err := Path()
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +72,7 @@ func Codespace(repository string) (string, error) {
 	return codespace, nil
 }
 
-func configPath() (string, error) {
+func Path() (string, error) {
 	root := os.Getenv("XDG_CONFIG_HOME")
 	if root == "" {
 		home, err := os.UserHomeDir()

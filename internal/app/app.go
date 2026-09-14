@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lowply/gh-workspace-run/internal/agentguide"
 	"github.com/lowply/gh-workspace-run/internal/config"
 	"github.com/lowply/gh-workspace-run/internal/connection"
 	"github.com/lowply/gh-workspace-run/internal/discovery"
@@ -23,6 +25,7 @@ import (
 
 const usage = `usage: gh workspace-run [--sync] [--remote-dir PATH] [--persist DURATION] [--verbose] [-- COMMAND [ARG...]]
        gh workspace-run config
+       gh workspace-run agent-guide
        gh workspace-run flush
 
 options:
@@ -33,14 +36,15 @@ options:
   -h, --help          Show help`
 
 type options struct {
-	sync       bool
-	helpOnly   bool
-	configOnly bool
-	flushOnly  bool
-	remoteDir  string
-	persist    time.Duration
-	verbose    bool
-	command    []string
+	sync           bool
+	helpOnly       bool
+	configOnly     bool
+	agentGuideOnly bool
+	flushOnly      bool
+	remoteDir      string
+	persist        time.Duration
+	verbose        bool
+	command        []string
 }
 
 type usageError struct {
@@ -61,6 +65,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	if opts.helpOnly {
 		_, _ = fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	if opts.agentGuideOnly {
+		configPath, err := config.Path()
+		if err != nil {
+			return fail(stderr, err)
+		}
+		_, _ = io.WriteString(stdout, strings.Replace(agentguide.Content(), "{{CONFIG_PATH}}", configPath, 1))
+		printCodespaceSuggestion(ctx, stdout)
 		return 0
 	}
 	if opts.configOnly {
@@ -151,6 +164,39 @@ func fail(stderr io.Writer, err error) int {
 	return 1
 }
 
+func printCodespaceSuggestion(ctx context.Context, stdout io.Writer) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	runner := process.Runner{}
+	repositoryOutput, err := runner.Output(ctx, cwd, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+	if err != nil {
+		return
+	}
+	repository := strings.TrimSpace(string(repositoryOutput))
+	codespacesOutput, err := runner.Output(ctx, cwd, "gh", "codespace", "list", "--repo", repository, "--json", "name")
+	if err != nil {
+		return
+	}
+	var codespaces []struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(codespacesOutput, &codespaces) != nil || len(codespaces) != 1 || codespaces[0].Name == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(stdout, `
+## Suggested mapping
+
+`+"`gh codespace list --repo %s`"+` returned exactly one Codespace:
+
+`+"```yaml"+`
+repositories:
+  %s: %s
+`+"```"+`
+`, repository, repository, codespaces[0].Name)
+}
+
 func displayCommand(command []string) string {
 	parts := make([]string, len(command))
 	for i, arg := range command {
@@ -174,6 +220,13 @@ func parseArgs(args []string) (options, error) {
 			return options{}, usageError{errors.New("config does not accept arguments or options")}
 		}
 		opts.configOnly = true
+		return opts, nil
+	}
+	if args[0] == "agent-guide" {
+		if len(args) != 1 {
+			return options{}, usageError{errors.New("agent-guide does not accept arguments or options")}
+		}
+		opts.agentGuideOnly = true
 		return opts, nil
 	}
 	if args[0] == "flush" {

@@ -19,6 +19,7 @@ func TestRunUsage(t *testing.T) {
 	}{
 		{name: "flush rejects options", args: []string{"flush", "--sync"}, wantErr: "flush does not accept arguments or options"},
 		{name: "config rejects command", args: []string{"config", "--", "true"}, wantErr: "config does not accept arguments or options"},
+		{name: "agent guide rejects arguments", args: []string{"agent-guide", "--verbose"}, wantErr: "agent-guide does not accept arguments or options"},
 		{name: "options without operation", args: []string{"--verbose"}, wantErr: "either --sync or a remote command is required"},
 		{name: "separator without command", args: []string{"--sync", "--"}, wantErr: "remote command is required after --"},
 		{name: "command without separator", args: []string{"true"}, wantErr: "remote command must follow --"},
@@ -67,6 +68,99 @@ func TestRunHelpWithoutExternalTools(t *testing.T) {
 		if stderr.Len() != 0 {
 			t.Fatalf("args = %q, stderr = %q, want empty", args, stderr.String())
 		}
+	}
+}
+
+func TestRunAgentGuideWithoutExternalTools(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	var stdout, stderr bytes.Buffer
+
+	status := Run(context.Background(), []string{"agent-guide"}, nil, &stdout, &stderr)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	guide := stdout.String()
+	for _, want := range []string{
+		"# gh-workspace-run Agent Guide",
+		"gh workspace-run --sync",
+		"gh workspace-run -- COMMAND [ARG...]",
+		"gh workspace-run agent-guide",
+		filepath.Join(configRoot, "gh-workspace-run", "config.yml"),
+		"repositories:",
+		"working-tree contents, not Git metadata",
+	} {
+		if !strings.Contains(guide, want) {
+			t.Fatalf("stdout = %q, want %q", guide, want)
+		}
+	}
+	if strings.Contains(guide, "Suggested mapping") {
+		t.Fatalf("stdout = %q, want no contextual suggestion", guide)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunAgentGuideSuggestsOnlyMatchingCodespace(t *testing.T) {
+	dir := t.TempDir()
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	writeAppExecutable(t, dir, "gh", `#!/bin/sh
+case "$1 $2" in
+  "repo view") printf 'lowply/project\n' ;;
+  "codespace list") printf '[{"name":"silver-space"}]\n' ;;
+  *) exit 9 ;;
+esac
+`)
+	t.Setenv("PATH", dir)
+	var stdout, stderr bytes.Buffer
+
+	status := Run(context.Background(), []string{"agent-guide"}, nil, &stdout, &stderr)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	guide := stdout.String()
+	for _, want := range []string{
+		"## Suggested mapping",
+		"lowply/project: silver-space",
+		"gh codespace list --repo lowply/project",
+	} {
+		if !strings.Contains(guide, want) {
+			t.Fatalf("stdout = %q, want %q", guide, want)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunAgentGuideOmitsSuggestionForMultipleCodespaces(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	writeAppExecutable(t, dir, "gh", `#!/bin/sh
+case "$1 $2" in
+  "repo view") printf 'lowply/project\n' ;;
+  "codespace list") printf '[{"name":"silver-space"},{"name":"gold-space"}]\n' ;;
+  *) exit 9 ;;
+esac
+`)
+	t.Setenv("PATH", dir)
+	var stdout, stderr bytes.Buffer
+
+	status := Run(context.Background(), []string{"agent-guide"}, nil, &stdout, &stderr)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Suggested mapping") {
+		t.Fatalf("stdout = %q, want no contextual suggestion", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 }
 
