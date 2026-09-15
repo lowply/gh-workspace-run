@@ -32,7 +32,10 @@ repositories:
   owner/repository: codespace-name
 ```
 
-Use `gh codespace list --repo OWNER/REPOSITORY` to inspect available Codespaces.
+If a repository is not mapped and exactly one Codespace exists for it, the
+command adds the mapping automatically and reports the config update. With zero
+or multiple Codespaces, add the desired mapping manually after inspecting
+`gh codespace list --repo OWNER/REPOSITORY`.
 
 ## Behavior and constraints
 

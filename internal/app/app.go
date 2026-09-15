@@ -120,7 +120,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if remoteDir == "" {
 		remoteDir = path.Join("/workspaces", discovered.RepositoryName)
 	}
-	codespace, err := config.Codespace(discovered.Repository)
+	codespace, err := resolveCodespace(
+		ctx,
+		runner,
+		discovered.Root,
+		discovered.Repository,
+		stdout,
+	)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -164,6 +170,77 @@ func fail(stderr io.Writer, err error) int {
 	return 1
 }
 
+func resolveCodespace(
+	ctx context.Context,
+	runner process.Runner,
+	cwd string,
+	repository string,
+	stdout io.Writer,
+) (string, error) {
+	codespace, found, err := config.Lookup(repository)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return codespace, nil
+	}
+
+	codespaces, err := listCodespaces(ctx, runner, cwd, repository)
+	if err != nil {
+		return "", err
+	}
+	switch len(codespaces) {
+	case 0:
+		return "", fmt.Errorf("no Codespaces found for repository %s", repository)
+	case 1:
+		if codespaces[0] == "" {
+			return "", fmt.Errorf("Codespace for repository %s has an empty name", repository)
+		}
+	default:
+		return "", fmt.Errorf(
+			"multiple Codespaces found for repository %s: %s",
+			repository,
+			strings.Join(codespaces, ", "),
+		)
+	}
+
+	configPath, err := config.Set(repository, codespaces[0])
+	if err != nil {
+		return "", err
+	}
+	_, _ = fmt.Fprintf(
+		stdout,
+		"Added config mapping: %s -> %s in %s\n",
+		repository,
+		codespaces[0],
+		configPath,
+	)
+	return codespaces[0], nil
+}
+
+func listCodespaces(
+	ctx context.Context,
+	runner process.Runner,
+	cwd string,
+	repository string,
+) ([]string, error) {
+	output, err := runner.Output(ctx, cwd, "gh", "codespace", "list", "--repo", repository, "--json", "name")
+	if err != nil {
+		return nil, fmt.Errorf("list Codespaces for repository %s: %w", repository, err)
+	}
+	var values []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(output, &values); err != nil {
+		return nil, fmt.Errorf("list Codespaces for repository %s: parse response: %w", repository, err)
+	}
+	codespaces := make([]string, len(values))
+	for i, value := range values {
+		codespaces[i] = value.Name
+	}
+	return codespaces, nil
+}
+
 func printCodespaceSuggestion(ctx context.Context, stdout io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -175,14 +252,11 @@ func printCodespaceSuggestion(ctx context.Context, stdout io.Writer) {
 		return
 	}
 	repository := strings.TrimSpace(string(repositoryOutput))
-	codespacesOutput, err := runner.Output(ctx, cwd, "gh", "codespace", "list", "--repo", repository, "--json", "name")
+	codespaces, err := listCodespaces(ctx, runner, cwd, repository)
 	if err != nil {
 		return
 	}
-	var codespaces []struct {
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(codespacesOutput, &codespaces) != nil || len(codespaces) != 1 || codespaces[0].Name == "" {
+	if len(codespaces) != 1 || codespaces[0] == "" {
 		return
 	}
 	_, _ = fmt.Fprintf(stdout, `
@@ -194,7 +268,7 @@ func printCodespaceSuggestion(ctx context.Context, stdout io.Writer) {
 repositories:
   %s: %s
 `+"```"+`
-`, repository, repository, codespaces[0].Name)
+`, repository, repository, codespaces[0])
 }
 
 func displayCommand(command []string) string {

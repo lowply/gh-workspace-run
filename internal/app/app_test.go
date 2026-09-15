@@ -3,12 +3,15 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestRunUsage(t *testing.T) {
@@ -381,6 +384,130 @@ func TestRunUsesConfiguredCodespaceWithoutListingCodespaces(t *testing.T) {
 	}
 }
 
+func TestRunAddsSoleCodespaceMappingAndContinues(t *testing.T) {
+	fixture := installWorkflowTools(t, 0, false)
+	if err := os.Remove(fixture.configPath); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	status := Run(context.Background(), []string{"--", "pwd"}, nil, &stdout, &stderr)
+
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	wantNotice := "Added config mapping: lowply/project -> silver-space in " + fixture.configPath + "\n"
+	if !strings.Contains(stdout.String(), wantNotice) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	assertAppMappings(t, fixture.configPath, map[string]string{
+		"lowply/project": "silver-space",
+	})
+	if got := fixture.events(); got != "run\n" {
+		t.Fatalf("events = %q", got)
+	}
+}
+
+func TestRunAddsMissingMappingWithoutRemovingExistingMappings(t *testing.T) {
+	fixture := installWorkflowTools(t, 0, false)
+	if err := os.WriteFile(
+		fixture.configPath,
+		[]byte("repositories:\n  other/repo: gold-space\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	status := Run(context.Background(), []string{"--", "pwd"}, nil, io.Discard, io.Discard)
+
+	if status != 0 {
+		t.Fatalf("status = %d", status)
+	}
+	assertAppMappings(t, fixture.configPath, map[string]string{
+		"other/repo":     "gold-space",
+		"lowply/project": "silver-space",
+	})
+}
+
+func TestRunRejectsUnsafeCodespaceDiscovery(t *testing.T) {
+	tests := []struct {
+		name       string
+		codespaces string
+		wantError  string
+	}{
+		{
+			name:       "no Codespaces",
+			codespaces: `[]`,
+			wantError:  "no Codespaces found for repository lowply/project",
+		},
+		{
+			name:       "multiple Codespaces",
+			codespaces: `[{"name":"silver-space"},{"name":"gold-space"}]`,
+			wantError:  "multiple Codespaces found for repository lowply/project: silver-space, gold-space",
+		},
+		{
+			name:       "unnamed Codespace",
+			codespaces: `[{"name":""}]`,
+			wantError:  "Codespace for repository lowply/project has an empty name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := installWorkflowTools(t, 0, false)
+			if err := os.Remove(fixture.configPath); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODESPACES_JSON", tt.codespaces)
+			var stderr bytes.Buffer
+
+			status := Run(context.Background(), []string{"--", "pwd"}, nil, io.Discard, &stderr)
+
+			if status != 1 {
+				t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.wantError) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantError)
+			}
+			if _, err := os.Stat(fixture.configPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config stat error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
+func TestRunDoesNotOverwriteMalformedConfig(t *testing.T) {
+	const malformed = "repositories: ["
+	fixture := installWorkflowTools(t, 0, false)
+	if err := os.WriteFile(fixture.configPath, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+
+	status := Run(context.Background(), []string{"--", "pwd"}, nil, io.Discard, &stderr)
+
+	if status != 1 {
+		t.Fatalf("status = %d, stderr = %q", status, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "parse configuration") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	ghCalls, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ghCalls), "codespace list\n") {
+		t.Fatalf("codespace list was called:\n%s", ghCalls)
+	}
+	content, err := os.ReadFile(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != malformed {
+		t.Fatalf("config changed to %q", content)
+	}
+}
+
 func TestRunDoesNotExecuteAfterRsyncFailure(t *testing.T) {
 	fixture := installWorkflowTools(t, 0, true)
 	var stderr bytes.Buffer
@@ -430,9 +557,10 @@ func TestRunUsesRemoteDirectoryOverride(t *testing.T) {
 }
 
 type workflowFixture struct {
-	eventLog string
-	ghLog    string
-	sshLog   string
+	eventLog   string
+	ghLog      string
+	sshLog     string
+	configPath string
 }
 
 func (f workflowFixture) events() string {
@@ -464,6 +592,7 @@ func installWorkflowTools(t *testing.T, remoteExit int, rsyncFails bool) workflo
 	t.Setenv("GH_LOG", ghLog)
 	t.Setenv("SSH_LOG", sshLog)
 	t.Setenv("REMOTE_EXIT", strconv.Itoa(remoteExit))
+	t.Setenv("CODESPACES_JSON", `[{"name":"silver-space"}]`)
 
 	writeAppExecutable(t, dir, "git", `#!/bin/sh
 if [ "$3" = "rev-parse" ]; then
@@ -482,7 +611,7 @@ printf '%s %s\n' "$1" "$2" >> "$GH_LOG"
 case "$1 $2" in
   "version ") printf 'gh version 2.100.0 (test)\n' ;;
   "repo view") printf 'lowply/project\n' ;;
-  "codespace list") printf '[{"name":"silver-space"}]\n' ;;
+  "codespace list") printf '%s\n' "$CODESPACES_JSON" ;;
   "codespace ssh") cat <<'EOF'
 Host silver-space
 	User vscode
@@ -516,7 +645,34 @@ esac
 	}
 	writeAppExecutable(t, dir, "rsync", "#!/bin/sh\nprintf 'rsync\\n' >> \"$EVENT_LOG\"\ncat >/dev/null\nexit "+rsyncExit+"\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return workflowFixture{eventLog: eventLog, ghLog: ghLog, sshLog: sshLog}
+	return workflowFixture{
+		eventLog:   eventLog,
+		ghLog:      ghLog,
+		sshLog:     sshLog,
+		configPath: filepath.Join(configDir, "config.yml"),
+	}
+}
+
+func assertAppMappings(t *testing.T, path string, want map[string]string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Repositories map[string]string `yaml:"repositories"`
+	}
+	if err := yaml.Unmarshal(content, &config); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Repositories) != len(want) {
+		t.Fatalf("repositories = %#v, want %#v", config.Repositories, want)
+	}
+	for repository, codespace := range want {
+		if config.Repositories[repository] != codespace {
+			t.Fatalf("repositories = %#v, want %#v", config.Repositories, want)
+		}
+	}
 }
 
 func writeAppExecutable(t *testing.T, dir, name, content string) {

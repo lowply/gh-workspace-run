@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -52,24 +55,116 @@ func Ensure() (string, bool, error) {
 	return path, true, nil
 }
 
-func Codespace(repository string) (string, error) {
+func Lookup(repository string) (string, bool, error) {
+	path, err := Path()
+	if err != nil {
+		return "", false, err
+	}
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read configuration %s: %w", path, err)
+	}
+	config, err := parse(path, content)
+	if err != nil {
+		return "", false, err
+	}
+	codespace := config.Repositories[repository]
+	return codespace, codespace != "", nil
+}
+
+func Set(repository, codespace string) (string, error) {
+	if repository == "" {
+		return "", fmt.Errorf("repository must not be empty")
+	}
+	if codespace == "" {
+		return "", fmt.Errorf("Codespace must not be empty")
+	}
 	path, err := Path()
 	if err != nil {
 		return "", err
 	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create configuration directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("secure configuration directory: %w", err)
+	}
+	writePath := path
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		writePath, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve configuration symlink %s: %w", path, err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect configuration %s: %w", path, err)
+	}
+
+	config := fileConfig{}
 	content, err := os.ReadFile(path)
-	if err != nil {
+	if err == nil {
+		config, err = parse(path, content)
+		if err != nil {
+			return "", err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read configuration %s: %w", path, err)
 	}
+	if config.Repositories == nil {
+		config.Repositories = make(map[string]string)
+	}
+	config.Repositories[repository] = codespace
+	content, err = yaml.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("serialize configuration %s: %w", path, err)
+	}
+	if err := write(writePath, content); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func parse(path string, content []byte) (fileConfig, error) {
 	var config fileConfig
-	if err := yaml.Unmarshal(content, &config); err != nil {
-		return "", fmt.Errorf("parse configuration %s: %w", path, err)
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
+		return fileConfig{}, fmt.Errorf("parse configuration %s: %w", path, err)
 	}
-	codespace := config.Repositories[repository]
-	if codespace == "" {
-		return "", fmt.Errorf("repository %s is not mapped in %s", repository, path)
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return fileConfig{}, fmt.Errorf("parse configuration %s: multiple YAML documents are not supported", path)
+	} else if !errors.Is(err, io.EOF) {
+		return fileConfig{}, fmt.Errorf("parse configuration %s: %w", path, err)
 	}
-	return codespace, nil
+	return config, nil
+}
+
+func write(path string, content []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".config.yml-*")
+	if err != nil {
+		return fmt.Errorf("create temporary configuration for %s: %w", path, err)
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return fmt.Errorf("secure temporary configuration for %s: %w", path, err)
+	}
+	if _, err := file.Write(content); err != nil {
+		file.Close()
+		return fmt.Errorf("write temporary configuration for %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temporary configuration for %s: %w", path, err)
+	}
+	if err := os.Rename(name, path); err != nil {
+		return fmt.Errorf("replace configuration %s: %w", path, err)
+	}
+	return nil
 }
 
 func Path() (string, error) {

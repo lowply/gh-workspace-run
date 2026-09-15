@@ -3,33 +3,34 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
-func TestCodespaceReturnsConfiguredRepositoryMapping(t *testing.T) {
+func TestLookupReturnsConfiguredRepositoryMapping(t *testing.T) {
 	writeConfig(t, `repositories:
   octocat/hello-world: example-codespace
 `)
 
-	got, err := Codespace("octocat/hello-world")
+	got, found, err := Lookup("octocat/hello-world")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "example-codespace" {
-		t.Fatalf("codespace = %q", got)
+	if !found || got != "example-codespace" {
+		t.Fatalf("codespace = %q, found = %v", got, found)
 	}
 }
 
-func TestCodespaceReportsConfigurationErrors(t *testing.T) {
+func TestLookupTreatsMissingFileAndMappingAsNotFound(t *testing.T) {
 	tests := []struct {
 		name    string
 		content *string
-		want    string
 	}{
-		{name: "missing file", want: "config.yml"},
-		{name: "malformed YAML", content: pointer("repositories: ["), want: "parse"},
-		{name: "unmapped repository", content: pointer("repositories:\n  other/repo: space\n"), want: "octocat/hello-world"},
+		{name: "missing file"},
+		{name: "missing mapping", content: pointer("repositories:\n  other/repo: space\n")},
 	}
 
 	for _, tt := range tests {
@@ -40,11 +41,152 @@ func TestCodespaceReportsConfigurationErrors(t *testing.T) {
 				writeConfig(t, *tt.content)
 			}
 
-			_, err := Codespace("octocat/hello-world")
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %v, want %q", err, tt.want)
+			got, found, err := Lookup("octocat/hello-world")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found || got != "" {
+				t.Fatalf("codespace = %q, found = %v", got, found)
 			}
 		})
+	}
+}
+
+func TestLookupRejectsMalformedConfiguration(t *testing.T) {
+	writeConfig(t, "repositories: [")
+
+	_, _, err := Lookup("octocat/hello-world")
+
+	if err == nil || !strings.Contains(err.Error(), "parse configuration") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLookupRejectsMultipleYAMLDocuments(t *testing.T) {
+	writeConfig(t, "repositories:\n  octocat/hello-world: example-codespace\n---\nrepositories: [")
+
+	_, _, err := Lookup("octocat/hello-world")
+
+	if err == nil || !strings.Contains(err.Error(), "parse configuration") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSetCreatesConfigurationWithMapping(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+
+	path, err := Set("octocat/hello-world", "example-codespace")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(root, "gh-workspace-run", "config.yml")
+	if path != wantPath {
+		t.Fatalf("path = %q, want %q", path, wantPath)
+	}
+	assertMappings(t, path, map[string]string{
+		"octocat/hello-world": "example-codespace",
+	})
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("directory mode = %o, want 700", got)
+	}
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("file mode = %o, want 600", got)
+	}
+}
+
+func TestSetPreservesExistingMappings(t *testing.T) {
+	writeConfig(t, "repositories:\n  other/repo: other-space\n")
+
+	path, err := Set("octocat/hello-world", "example-codespace")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMappings(t, path, map[string]string{
+		"other/repo":          "other-space",
+		"octocat/hello-world": "example-codespace",
+	})
+}
+
+func TestSetDoesNotOverwriteMalformedConfiguration(t *testing.T) {
+	const malformed = "repositories: ["
+	writeConfig(t, malformed)
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Set("octocat/hello-world", "example-codespace")
+
+	if err == nil || !strings.Contains(err.Error(), "parse configuration") {
+		t.Fatalf("error = %v", err)
+	}
+	content, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != malformed {
+		t.Fatalf("configuration changed to %q", content)
+	}
+}
+
+func TestSetPreservesConfigurationSymlink(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(target, []byte("repositories:\n  other/repo: other-space\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Set("octocat/hello-world", "example-codespace"); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("configuration path mode = %v, want symlink", info.Mode())
+	}
+	assertMappings(t, target, map[string]string{
+		"other/repo":          "other-space",
+		"octocat/hello-world": "example-codespace",
+	})
+}
+
+func assertMappings(t *testing.T, path string, want map[string]string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config fileConfig
+	if err := yaml.Unmarshal(content, &config); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(config.Repositories, want) {
+		t.Fatalf("repositories = %#v, want %#v", config.Repositories, want)
 	}
 }
 
