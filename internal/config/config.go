@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -91,6 +93,16 @@ func Set(repository, codespace string) (string, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("secure configuration directory: %w", err)
 	}
+	writePath := path
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		writePath, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve configuration symlink %s: %w", path, err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect configuration %s: %w", path, err)
+	}
 
 	config := fileConfig{}
 	content, err := os.ReadFile(path)
@@ -110,7 +122,7 @@ func Set(repository, codespace string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("serialize configuration %s: %w", path, err)
 	}
-	if err := write(path, content); err != nil {
+	if err := write(writePath, content); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -118,7 +130,14 @@ func Set(repository, codespace string) (string, error) {
 
 func parse(path string, content []byte) (fileConfig, error) {
 	var config fileConfig
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	if err := decoder.Decode(&config); err != nil && !errors.Is(err, io.EOF) {
+		return fileConfig{}, fmt.Errorf("parse configuration %s: %w", path, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return fileConfig{}, fmt.Errorf("parse configuration %s: multiple YAML documents are not supported", path)
+	} else if !errors.Is(err, io.EOF) {
 		return fileConfig{}, fmt.Errorf("parse configuration %s: %w", path, err)
 	}
 	return config, nil

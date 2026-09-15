@@ -115,8 +115,10 @@ repositories:
   octocat/hello-world: example-codespace
 ```
 
-Every repository must be mapped to its Codespace name. The command fails rather
-than searching for an unmapped Codespace.
+When the current repository is not mapped, the command searches its Codespaces.
+If exactly one Codespace exists, the command adds that mapping to the config,
+reports the update, and continues. Zero or multiple Codespaces cause an error
+without changing the config.
 
 Print a detailed Markdown guide for coding agents:
 
@@ -146,7 +148,9 @@ DEBUG=1 gh workspace-run --sync
 1. Resolve the current Git worktree and GitHub repository from its `origin`,
    falling back to GitHub CLI when needed.
 2. Read the repository's Codespace name from
-   `${XDG_CONFIG_HOME:-~/.config}/gh-workspace-run/config.yml`.
+   `${XDG_CONFIG_HOME:-~/.config}/gh-workspace-run/config.yml`. If the mapping
+   is missing, list the repository's Codespaces and save the mapping when
+   exactly one exists.
 3. Generate supported OpenSSH configuration with `gh codespace ssh --config`.
 4. Configure OpenSSH connection multiplexing with `ControlPersist 3h`.
 5. When synchronization is requested, compare
@@ -182,8 +186,8 @@ Create a Codespace for the current repository, then rerun the command.
 
 **Multiple Codespaces found**
 
-Version 1 intentionally does not guess. Stop or remove the unused Codespaces so
-exactly one remains for the repository.
+The command does not guess. Add the desired mapping to the config, or stop or
+remove unused Codespaces so exactly one remains for the repository.
 
 **SSH server is missing**
 

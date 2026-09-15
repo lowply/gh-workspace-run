@@ -62,6 +62,16 @@ func TestLookupRejectsMalformedConfiguration(t *testing.T) {
 	}
 }
 
+func TestLookupRejectsMultipleYAMLDocuments(t *testing.T) {
+	writeConfig(t, "repositories:\n  octocat/hello-world: example-codespace\n---\nrepositories: [")
+
+	_, _, err := Lookup("octocat/hello-world")
+
+	if err == nil || !strings.Contains(err.Error(), "parse configuration") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestSetCreatesConfigurationWithMapping(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", root)
@@ -128,6 +138,41 @@ func TestSetDoesNotOverwriteMalformedConfiguration(t *testing.T) {
 	if string(content) != malformed {
 		t.Fatalf("configuration changed to %q", content)
 	}
+}
+
+func TestSetPreservesConfigurationSymlink(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(target, []byte("repositories:\n  other/repo: other-space\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Set("octocat/hello-world", "example-codespace"); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("configuration path mode = %v, want symlink", info.Mode())
+	}
+	assertMappings(t, target, map[string]string{
+		"other/repo":          "other-space",
+		"octocat/hello-world": "example-codespace",
+	})
 }
 
 func assertMappings(t *testing.T, path string, want map[string]string) {
